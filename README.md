@@ -156,8 +156,8 @@ UPDATE collections SET <variable> = <id> WHERE id = <id>;
 
 ## 📝 License
 
-Copyright © 2024 [Nadina Oates](https://github.com/trashpirate).
-This project is [MIT](https://github.com/trashpirate/reflections-bot/blob/master/LICENSE) licensed.
+Copyright © 2025 [EARN Labs](https://github.com/earn-labs).
+This project is [GNU](https://github.com/earn-labs/earn-nft-bot/blob/master/LICENSE) licensed.
 
 
 
