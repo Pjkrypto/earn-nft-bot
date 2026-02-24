@@ -450,7 +450,7 @@ async def enter_contract(update: Update, context: CustomContext):
         await user_message.delete()
 
         if contract is not None and is_address(contract):
-            context.contract = contract
+            context.contract = Web3.to_checksum_address(contract)
             message_text = title_message
             message_text += "Selected Network: *" + network_symbol(context.network) + "*\n\n"
             message_text += "Contract Address: *" + contract + "*\n\n"
