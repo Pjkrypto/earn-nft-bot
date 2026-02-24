@@ -165,7 +165,11 @@ def create_qn_stream(network:str, contract:str, route:str, start_block:int = 0, 
 
 def create_stream(network:str, contract:str, route:str) -> Union[str,NoneType]:
     if config.env == 'local':
-        test_block = config.test_blocks[TEST_TYPE][contract]
+        addr = Web3.to_checksum_address(contract)
+        tb = config.test_blocks.get(TEST_TYPE, {})
+        test_block = tb.get(addr) or tb.get(addr.lower())
+        if test_block is None:
+             test_block = 0  # safe fallback
         webhook_id = create_qn_stream(
             network=network,
             contract=contract,
