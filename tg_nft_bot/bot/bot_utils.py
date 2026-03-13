@@ -434,7 +434,6 @@ def generate_output(network, contract, owner, token_id, hash, info):
     token_id = str(token_id)
 
     collection = query_collection(network, contract)
-
     if collection is None:
         collection = query_collection(network, contract.lower())
 
@@ -446,10 +445,17 @@ def generate_output(network, contract, owner, token_id, hash, info):
     website = collection["website"]
 
     total_supply = get_total_supply(network, contract, minter)
-    nft_data = get_metadata(network, contract, token_id)
+
+    # Metadata can lag right after mint. Fall back gracefully.
+    nft_data = get_metadata(network, contract, token_id) or {}
 
     nft_name = nft_data.get("name") or f"{collection_name} #{token_id}"
-    nft_image = get_url(nft_data["image"], True)
+
+    raw_image = nft_data.get("image")
+    if raw_image:
+        nft_image = get_url(raw_image, True)
+    else:
+        nft_image = website
 
     opensea = OPENSEA[network] + contract + "/" + token_id
     rarible = RARIBLE[network] + contract + ":" + token_id
@@ -483,10 +489,10 @@ def generate_output(network, contract, owner, token_id, hash, info):
 
     message += '<a href="' + scan + "address/" + owner + '">Owner</a> | '
     message += '<a href="' + scan + "tx/" + hash + '">TX Hash</a> | '
-    message += '<a href="' + scan + "token/" + contract + "#code" + '">Contract</a>\n'
+    message += '<a href="' + scan + "token/" + contract + '#code">Contract</a>\n'
 
-    attributes = nft_data.get("attributes")
-    if attributes is not None:
+    attributes = nft_data.get("attributes") or []
+    if attributes:
         message += "\n<u>Traits:</u>\n"
         for attr in attributes:
             trait_type = attr.get("trait_type", "")
