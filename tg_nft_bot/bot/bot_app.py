@@ -25,7 +25,14 @@ from telegram.ext import (
 from tronpy import Tron
 from web3 import Web3
 
-from tg_nft_bot.bot.bot_utils import CustomContext, WebhookUpdate, create_webhook_route
+from tg_nft_bot.bot.bot_utils import (
+    CustomContext,
+    WebhookUpdate,
+    create_webhook_route,
+    application,
+    webhook_update,
+    normalize_network,
+)
 from tg_nft_bot.db.db_operations import (
     add_config,
     check_if_exists,
@@ -39,7 +46,7 @@ from tg_nft_bot.db.db_operations import (
 )
 
 # helpers
-from tg_nft_bot.utils.addresses import get_hex_address, is_address
+from tg_nft_bot.utils.addresses import is_address
 from tg_nft_bot.utils.networks import NETWORK_SYMBOLS
 from tg_nft_bot.utils.credentials import URL
 from tg_nft_bot.streams.streams_operations import (
@@ -49,13 +56,11 @@ from tg_nft_bot.streams.streams_operations import (
 from tg_nft_bot.nft.nft_operations import get_collection_info
 from tg_nft_bot.nft.nft_constants import OPENSEA_NETWORK
 
-from tg_nft_bot.bot.bot_utils import application, webhook_update
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-# set higher logging level for httpx to avoid all GET and POST requests being logged
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
@@ -64,81 +69,17 @@ logger = logging.getLogger(__name__)
 #######################     BOT      ############################
 #################################################################
 
-# standard messages
 cancel_message = "Use /start in group chat to restart the bot."
 title_message = "*CONFIG MENU*\n\n"
 
-# states
 MAIN, NETWORK, CONTRACT, MINTER, WEBSITE, ADD_CONFIG = range(6)
 
 
-# ----------------------------
-# Network normalization + safe lookups
-# ----------------------------
-def normalize_network(net: str) -> str:
-    """
-    Normalizes legacy / human network labels into the canonical keys used
-    by this bot (i.e., the callback_data strings like 'polygon-mainnet').
-
-    This prevents KeyError crashes when older DB rows contain values like 'MATIC'.
-    """
-    if not net:
-        return net
-
-    raw = net.strip()
-    u = raw.upper()
-
-    aliases = {
-        # Polygon / Matic
-        "MATIC": "polygon-mainnet",
-        "POLYGON": "polygon-mainnet",
-        "POLYGON-MAINNET": "polygon-mainnet",
-        # Ethereum
-        "ETH": "ethereum-mainnet",
-        "ETHEREUM": "ethereum-mainnet",
-        "ETHEREUM-MAINNET": "ethereum-mainnet",
-        # Arbitrum
-        "ARB": "arbitrum-mainnet",
-        "ARBITRUM": "arbitrum-mainnet",
-        "ARBITRUM-MAINNET": "arbitrum-mainnet",
-        # Base
-        "BASE": "base-mainnet",
-        "BASE-MAINNET": "base-mainnet",
-        # BNB
-        "BNB": "bnbchain-mainnet",
-        "BSC": "bnbchain-mainnet",
-        "BNBCHAIN": "bnbchain-mainnet",
-        "BNBCHAIN-MAINNET": "bnbchain-mainnet",
-        # Tron
-        "TRON": "tron-mainnet",
-        "TRON-MAINNET": "tron-mainnet",
-    }
-
-    return aliases.get(u, raw)
+def display_network_name(network: str) -> str:
+    net = normalize_network(network)
+    return NETWORK_SYMBOLS.get(net, net or "")
 
 
-def network_symbol(net: str) -> str:
-    """
-    Returns the display symbol/name for a network key.
-    Never raises KeyError.
-    """
-    k = normalize_network(net)
-    return NETWORK_SYMBOLS.get(k, k)
-
-
-def opensea_network_key(net: str) -> str:
-    """
-    Returns OPENSEA_NETWORK mapping value for a network key.
-    Never raises KeyError; falls back to ethereum mapping (or 'ethereum' string).
-    """
-    k = normalize_network(net)
-    if k in OPENSEA_NETWORK:
-        return OPENSEA_NETWORK[k]
-    # Safe fallback
-    return OPENSEA_NETWORK.get("ethereum-mainnet", "ethereum")
-
-
-# keybords
 def return_menu():
     keyboard = [
         [
@@ -185,15 +126,23 @@ def network_menu():
     return [InlineKeyboardMarkup(keyboard), message_text]
 
 
+def safe_delete_stream(webhook_id):
+    if not webhook_id:
+        print("safe_delete_stream skipped because webhook_id is empty/None")
+        return
+    try:
+        delete_stream(webhook_id)
+    except Exception:
+        traceback.print_exc()
+
+
 def bot_removed(update: Update, context: CallbackContext) -> None:
-    # Extract the new and old status of the bot
     old_status = update.my_chat_member.old_chat_member.status
     new_status = update.my_chat_member.new_chat_member.status
 
     if old_status in [ChatMember.ADMINISTRATOR, ChatMember.MEMBER] and (
         new_status == ChatMember.BANNED or new_status == ChatMember.LEFT
     ):
-
         collections = query_collection_by_chat(update.effective_chat.id)
 
         for collection in collections:
@@ -202,9 +151,7 @@ def bot_removed(update: Update, context: CallbackContext) -> None:
                 len(collection["chats"]) == 1
                 and collection["chats"][0] == update.effective_chat.id
             ):
-                # delete webhook
-                # delete db entry
-                delete_stream(collection["webhookId"])
+                safe_delete_stream(collection.get("webhookId"))
                 delete_config_by_id(collection["id"])
             else:
                 for chat in collection["chats"]:
@@ -215,11 +162,11 @@ def bot_removed(update: Update, context: CallbackContext) -> None:
 
 
 async def enter_website(update: Update, context: CustomContext):
-
     query = update.callback_query
 
     if query is not None:
         await query.answer()
+
         if query.data == "cancel":
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
@@ -231,7 +178,7 @@ async def enter_website(update: Update, context: CustomContext):
         if query.data == "return":
             message_text = title_message
             message_text += (
-                "Selected Network: *" + network_symbol(context.network) + "*\n\n"
+                "Selected Network: *" + display_network_name(context.network) + "*\n\n"
             )
             message_text += "_Enter NFT Contract address:_\n\n"
             reply_markup = return_menu()
@@ -241,21 +188,18 @@ async def enter_website(update: Update, context: CustomContext):
                 reply_markup=reply_markup,
                 parse_mode=ParseMode.MARKDOWN,
             )
-
             return CONTRACT
 
     else:
-        website = update.message.text
-
+        website = update.message.text.strip()
         user_message = update.message
         await user_message.delete()
 
-        if website == context.contract:
-            return WEBSITE
+        if website == "#":
+            website = ""
 
         try:
-
-            [name, slug] = get_collection_info(context.network, context.contract)
+            name, slug = get_collection_info(context.network, context.contract)
 
             if name is None:
                 raise Exception("Invalid contract address.")
@@ -266,7 +210,7 @@ async def enter_website(update: Update, context: CustomContext):
                 else:
                     website = (
                         "https://opensea.io/assets/"
-                        + opensea_network_key(context.network)
+                        + OPENSEA_NETWORK[context.network]
                         + "/"
                         + context.contract
                     )
@@ -282,15 +226,13 @@ async def enter_website(update: Update, context: CustomContext):
                 raise Exception("Webhook creation failed.")
 
             entry = check_if_exists(context.network, context.contract)
-            if entry is None:
-                # TODO:
-                # check if contract exists
 
+            if entry is None:
                 add_config(
                     name,
                     slug,
                     context.network,
-                    context.contract,
+                    context.contract.lower(),
                     context.minter,
                     website,
                     webhook_id,
@@ -298,27 +240,25 @@ async def enter_website(update: Update, context: CustomContext):
                 )
                 status = "_Collection is added._"
             else:
-
-                chats: list[str] = query_chats_by_contract(
+                chats: list[int] = query_chats_by_contract(
                     context.network, context.contract
                 )
 
-                exist_count = chats.count(context.chat)
-                if exist_count == 0:
+                if context.chat not in chats:
                     chats.append(context.chat)
 
                 update_config(
                     name,
                     slug,
                     context.network,
-                    context.contract,
+                    context.contract.lower(),
                     context.minter,
                     website,
                     webhook_id,
                     chats,
                 )
-
                 status = "_Collection is updated._"
+
         except Exception as e:
             traceback.print_exc()
             status = (
@@ -328,11 +268,14 @@ async def enter_website(update: Update, context: CustomContext):
             )
 
         message_text = title_message
-        message_text += "Selected Network: *" + network_symbol(context.network) + "*\n\n"
+        message_text += (
+            "Selected Network: *" + display_network_name(context.network) + "*\n\n"
+        )
         message_text += "Contract Address: *" + context.contract + "*\n\n"
         message_text += "Minter Address: *" + context.minter + "*\n\n"
         message_text += "Website: *" + website + "*\n\n"
         message_text += status
+
         reply_markup = return_menu()
 
         await context.bot.edit_message_text(
@@ -346,11 +289,11 @@ async def enter_website(update: Update, context: CustomContext):
 
 
 async def enter_minter(update: Update, context: CustomContext):
-
     query = update.callback_query
 
     if query is not None:
         await query.answer()
+
         if query.data == "cancel":
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
@@ -367,16 +310,13 @@ async def enter_minter(update: Update, context: CustomContext):
                 reply_markup=reply_markup,
                 parse_mode=ParseMode.MARKDOWN,
             )
-
             return CONTRACT
 
-    # process text entry
     else:
-
         minter = (
             "0x0000000000000000000000000000000000000000"
             if update.message.text == "0"
-            else update.message.text
+            else update.message.text.strip()
         )
 
         user_message = update.message
@@ -384,8 +324,11 @@ async def enter_minter(update: Update, context: CustomContext):
 
         if minter is not None and is_address(minter):
             context.minter = Web3.to_checksum_address(minter)
+
             message_text = title_message
-            message_text += "Selected Network: *" + network_symbol(context.network) + "*\n\n"
+            message_text += (
+                "Selected Network: *" + display_network_name(context.network) + "*\n\n"
+            )
             message_text += "Contract Address: *" + context.contract + "*\n\n"
             message_text += "Minter Address: *" + minter + "*\n\n"
             message_text += "_Enter your main collection website (e.g. https://mintingsite.com, enter # to skip):_\n\n"
@@ -398,30 +341,32 @@ async def enter_minter(update: Update, context: CustomContext):
                 reply_markup=reply_markup,
                 parse_mode=ParseMode.MARKDOWN,
             )
-
             return WEBSITE
 
         else:
             message_text = title_message
-            message_text += "Selected Network: *" + network_symbol(context.network) + "*\n\n"
+            message_text += (
+                "Selected Network: *" + display_network_name(context.network) + "*\n\n"
+            )
             message_text += "Contract Address: *" + context.contract + "*\n\n"
             message_text += "Minter Address: *" + minter + "*\n\n"
             message_text += "_Please enter a valid minter address or enter '0' for regular mints:_\n\n"
+
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=context.menu,
                 text=message_text,
                 parse_mode=ParseMode.MARKDOWN,
             )
-            return CONTRACT
+            return MINTER
 
 
 async def enter_contract(update: Update, context: CustomContext):
-
     query = update.callback_query
 
     if query is not None:
         await query.answer()
+
         if query.data == "cancel":
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
@@ -438,21 +383,21 @@ async def enter_contract(update: Update, context: CustomContext):
                 reply_markup=reply_markup,
                 parse_mode=ParseMode.MARKDOWN,
             )
-
             return NETWORK
 
-    # process text entry
     else:
-
-        contract = update.message.text
+        contract = update.message.text.strip()
 
         user_message = update.message
         await user_message.delete()
 
         if contract is not None and is_address(contract):
             context.contract = Web3.to_checksum_address(contract)
+
             message_text = title_message
-            message_text += "Selected Network: *" + network_symbol(context.network) + "*\n\n"
+            message_text += (
+                "Selected Network: *" + display_network_name(context.network) + "*\n\n"
+            )
             message_text += "Contract Address: *" + contract + "*\n\n"
             message_text += "_Enter '0' if regular minting contract or specify minter address':_\n\n"
             reply_markup = return_menu()
@@ -464,14 +409,16 @@ async def enter_contract(update: Update, context: CustomContext):
                 reply_markup=reply_markup,
                 parse_mode=ParseMode.MARKDOWN,
             )
-
             return MINTER
 
         else:
             message_text = title_message
-            message_text += "Selected Network: *" + network_symbol(context.network) + "*\n\n"
+            message_text += (
+                "Selected Network: *" + display_network_name(context.network) + "*\n\n"
+            )
             message_text += "Contract Address: *" + contract + "*\n\n"
             message_text += "_Please enter a valid contract address:_\n\n"
+
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=context.menu,
@@ -482,7 +429,6 @@ async def enter_contract(update: Update, context: CustomContext):
 
 
 async def select_network(update: Update, context: CustomContext):
-
     query = update.callback_query
     await query.answer()
 
@@ -502,15 +448,15 @@ async def select_network(update: Update, context: CustomContext):
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN,
         )
-
         return MAIN
 
-    context.network = query.data
+    context.network = normalize_network(query.data)
 
     message_text = title_message
-    message_text += "Selected Network: *" + network_symbol(query.data) + "*\n\n"
+    message_text += "Selected Network: *" + display_network_name(context.network) + "*\n\n"
     message_text += "_Enter NFT Contract address:_\n\n"
     reply_markup = return_menu()
+
     await query.edit_message_text(
         text=message_text,
         reply_markup=reply_markup,
@@ -521,7 +467,6 @@ async def select_network(update: Update, context: CustomContext):
 
 
 async def select_action(update: Update, context: CustomContext):
-
     query = update.callback_query
     await query.answer()
 
@@ -541,69 +486,61 @@ async def select_action(update: Update, context: CustomContext):
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN,
         )
-
         return MAIN
 
     if query.data == "view":
-
         try:
             message_text = "<b>BOT CONFIGURATIONS:</b>\n\n"
             index = 1
             config_buttons = []
             rows: list[dict] = query_table()
+
             if len(rows) == 0:
                 message_text = "No collections configured."
             else:
                 for r in rows:
                     cid = r["id"]
                     name = r["name"]
-                    network = normalize_network(r["network"])  # <-- FIX
+                    network = normalize_network(r["network"])
                     contract = r["contract"]
                     website = r["website"]
                     chats = r["chats"]
 
-                    chats_isAdmin = []
+                    chats_is_admin = []
                     for chat in chats:
                         try:
                             admins = await application.bot.get_chat_administrators(chat)
                             admin_ids = [admin["user"]["id"] for admin in admins]
                             if update.effective_user.id in admin_ids:
-                                chats_isAdmin.append(chat)
+                                chats_is_admin.append(chat)
                         except Exception:
                             pass
 
-                    # show only configs where user is admin in at least one chat
-                    if len(chats_isAdmin) > 0:
+                    if len(chats_is_admin) > 0:
                         if network == "tron-mainnet":
                             contract = Tron.to_base58check_address(
                                 Tron.to_hex_address(contract)
                             )
 
-                        symbol = network_symbol(network)
-
                         message_text += (
                             f"<u><b>CONFIG {index}:</b></u>\n"
                             f"Name: {name}\n"
-                            f"Network: {symbol}\n"
+                            f"Network: {display_network_name(network)}\n"
                             f"CA: {contract}\n"
                             f"Website: {website}\n"
                             f"Chats: "
                         )
 
-                        for chat in chats_isAdmin:
+                        for chat in chats_is_admin:
                             group_chat = await context.bot.get_chat(chat)
-                            if group_chat.title is None:
-                                chat_name = group_chat.username
-                            else:
-                                chat_name = group_chat.title
+                            chat_name = group_chat.title or group_chat.username
                             message_text += chat_name + ", "
 
                         message_text = message_text[:-2] + "\n\n"
 
                         row_buttons = [
                             InlineKeyboardButton(
-                                "ADD CONFIG " + str(index),
-                                callback_data="add-" + str(cid),
+                                "ADD CONFIG " + str(index), callback_data="add-" + str(cid)
                             ),
                             InlineKeyboardButton(
                                 "DELETE CONFIG " + str(index),
@@ -631,18 +568,17 @@ async def select_action(update: Update, context: CustomContext):
                 reply_markup=reply_markup,
                 parse_mode=ParseMode.HTML,
             )
-
             return ADD_CONFIG
 
         except Exception:
             traceback.print_exc()
             reply_markup = return_menu()
+
             await query.edit_message_text(
                 text="No configurations found.",
                 reply_markup=reply_markup,
                 parse_mode=ParseMode.MARKDOWN,
             )
-
             return MAIN
 
     if query.data == "new":
@@ -658,7 +594,6 @@ async def select_action(update: Update, context: CustomContext):
 
 
 async def add_collection(update: Update, context: CustomContext):
-
     query = update.callback_query
     await query.answer()
 
@@ -678,21 +613,19 @@ async def add_collection(update: Update, context: CustomContext):
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN,
         )
-
         return MAIN
 
     if query.data[:3] == "add":
         collection = query_collection_by_id(int(query.data[4:]))
         chats: list[int] = collection["chats"]
 
-        exist_count = chats.count(context.chat)
-        if exist_count == 0:
+        if context.chat not in chats:
             chats.append(context.chat)
 
             update_config(
                 collection["name"],
                 collection["slug"],
-                collection["network"],
+                normalize_network(collection["network"]),
                 collection["contract"],
                 collection["minter"],
                 collection["website"],
@@ -700,58 +633,46 @@ async def add_collection(update: Update, context: CustomContext):
                 chats,
             )
 
-            name = collection["name"]
-            status = f"<i>{name} collection added.</i>"
+            status = f"<i>{collection['name']} collection added.</i>"
         else:
-            name = collection["name"]
-            status = f"<i>{name} collection aready added.</i>"
+            status = f"<i>{collection['name']} collection already added.</i>"
 
     if query.data[:3] == "del":
         collection = query_collection_by_id(int(query.data[4:]))
 
         if len(collection["chats"]) == 1 and collection["chats"][0] == context.chat:
-            name = collection["name"]
-            delete_stream(collection["webhookId"])
+            safe_delete_stream(collection.get("webhookId"))
             delete_config_by_id(collection["id"])
-
-            status = f"<i>{name} collection removed from group chat.</i>"
+            status = f"<i>{collection['name']} collection removed from group chat.</i>"
         else:
-            new_chats = []
-            for chat in collection["chats"]:
-                if chat != context.chat:
-                    new_chats.append(chat)
-
+            new_chats = [chat for chat in collection["chats"] if chat != context.chat]
             update_chats_by_id(collection["id"], new_chats)
-            name = collection["name"]
-            status = f"<i>{name} collection removed.</i>"
+            status = f"<i>{collection['name']} collection removed.</i>"
 
     try:
         message_text = "<b>BOT CONFIGURATIONS:</b>\n\n"
         index = 1
-        row_buttons = []
         config_buttons = []
         rows: list[dict] = query_table()
 
         for r in rows:
             cid = r["id"]
             name = r["name"]
-            network = normalize_network(r["network"])  # <-- FIX
+            network = normalize_network(r["network"])
             contract = r["contract"]
             website = r["website"]
             chats = r["chats"]
 
-            chats_isAdmin = []
+            chats_is_admin = []
             for chat in chats:
                 admins = await application.bot.get_chat_administrators(chat)
                 admin_ids = [admin["user"]["id"] for admin in admins]
                 if update.effective_user.id in admin_ids:
-                    chats_isAdmin.append(chat)
+                    chats_is_admin.append(chat)
 
-            # throw exception if user is not admin in any of the configured groups
-            if len(chats_isAdmin) == 0:
-                raise Exception("User is not admin of any configurations.")
+            if len(chats_is_admin) == 0:
+                continue
 
-            # configure website
             if len(r["website"]) > 8:
                 website = r["website"]
             elif network == "tron-mainnet":
@@ -759,29 +680,23 @@ async def add_collection(update: Update, context: CustomContext):
             else:
                 website = (
                     "https://opensea.io/assets/"
-                    + opensea_network_key(network)  # <-- FIX (safe)
+                    + OPENSEA_NETWORK[network]
                     + "/"
                     + contract
                 )
 
-            # output message (safe symbol)
-            symbol = network_symbol(network)
             message_text += (
                 f"<u><b>CONFIG {index}:</b></u>\n"
                 f"Name: {name}\n"
-                f"Network: {symbol}\n"
+                f"Network: {display_network_name(network)}\n"
                 f"CA: {contract}\n"
                 f"Website: {website}\n"
                 f"Chats: "
             )
 
-            # send message to bot
-            for chat in chats_isAdmin:
+            for chat in chats_is_admin:
                 group_chat = await context.bot.get_chat(chat)
-                if group_chat.title is None:
-                    chat_name = group_chat.username
-                else:
-                    chat_name = group_chat.title
+                chat_name = group_chat.title or group_chat.username
                 message_text += chat_name + ", "
 
             message_text = message_text[:-2] + "\n\n"
@@ -798,6 +713,9 @@ async def add_collection(update: Update, context: CustomContext):
 
             index += 1
 
+        if index == 1:
+            raise Exception("No configurations found.")
+
         message_text += status
         config_buttons.append(
             [
@@ -813,24 +731,22 @@ async def add_collection(update: Update, context: CustomContext):
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML,
         )
-
         return ADD_CONFIG
 
     except Exception:
         traceback.print_exc()
         reply_markup = return_menu()
+
         await query.edit_message_text(
             text="No configurations found.",
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN,
         )
-
         return MAIN
 
 
 async def start(update: Update, context: CustomContext):
-
-    if update.effective_chat.type == "group" or update.effective_chat.type == "supergroup":
+    if update.effective_chat.type in ("group", "supergroup"):
         admins = await update.effective_chat.get_administrators()
         admin_ids = [admin["user"]["id"] for admin in admins]
 
@@ -844,7 +760,10 @@ async def start(update: Update, context: CustomContext):
         else:
             group_chat_id = update.effective_chat.id
             bot_username = context.bot.username
-            message = "To configure bot: " f"[Click here](https://t.me/{bot_username}?start={group_chat_id})"
+            message = (
+                "To configure bot: "
+                f"[Click here](https://t.me/{bot_username}?start={group_chat_id})"
+            )
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=message,
@@ -855,6 +774,7 @@ async def start(update: Update, context: CustomContext):
         if context.args:
             context.chat = int(context.args[0])
             [reply_markup, message_text] = main_menu()
+
             message = await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=message_text,
@@ -873,7 +793,6 @@ async def start(update: Update, context: CustomContext):
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels and ends the conversation."""
     user = update.message.from_user
     logger.info("User %s canceled the conversation.", user.first_name)
 
@@ -883,13 +802,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         reply_markup=ReplyKeyboardRemove(),
         parse_mode=ParseMode.MARKDOWN,
     )
-
     return ConversationHandler.END
 
 
 async def start_app():
-
-    # conversation handlers
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -912,7 +828,6 @@ async def start_app():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    # define handlers
     application.add_handler(conv_handler)
     application.add_handler(
         TypeHandler(type=WebhookUpdate, callback=webhook_update, block=False)
@@ -921,17 +836,14 @@ async def start_app():
         ChatMemberHandler(bot_removed, ChatMemberHandler.MY_CHAT_MEMBER)
     )
 
-    # Set bot commands
     commands = [
         BotCommand("start", "Start the bot"),
         BotCommand("cancel", "Cancel the current operation"),
-        # Add other commands here
     ]
     await application.bot.set_my_commands(
         commands, scope=BotCommandScopeAllChatAdministrators()
     )
 
-    # webhooks
     await application.bot.set_webhook(
         url=f"{URL}/telegram", allowed_updates=Update.ALL_TYPES
     )
