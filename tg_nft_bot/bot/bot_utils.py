@@ -309,9 +309,18 @@ def parse_alchemy_tx(json_data: dict) -> Optional[list]:
 
             # Best-effort mint classification:
             # NFT mints are transfers from zero address.
-            event_type = "mint"
-            if from_address and from_address.lower() != "0x0000000000000000000000000000000000000000":
-                event_type = "sale"
+            zero_address = "0x0000000000000000000000000000000000000000"
+
+            if not from_address or from_address.lower() != zero_address:
+                continue
+
+            info = {
+                "type": "mint",
+                "price": "",
+                "price_usd": "",
+                "currency": "",
+                "marketplace": "alchemy",
+            }
 
             info = {
                 "type": event_type,
