@@ -325,7 +325,7 @@ def parse_alchemy_tx(json_data: dict) -> Optional[list]:
                 {
                     "webhook_id": webhook_id,
                     "network": event_network,
-                    "contract": Web3.to_checksum_address(contract),
+                    "contract": contract.lower(),
                     "owner": Web3.to_checksum_address(owner),
                     "token_id": token_id,
                     "hash": tx_hash,
