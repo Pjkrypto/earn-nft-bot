@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 import traceback
 
 from flask import Response, request
@@ -73,9 +73,6 @@ def normalize_network(net: Optional[str]) -> Optional[str]:
 
 
 def normalize_scan_network(net: str) -> str:
-    """
-    Ensures keys used against SCANS/OPENSEA/etc. are canonical.
-    """
     return normalize_network(net)
 
 
@@ -189,7 +186,9 @@ def create_webhook_route(route: str):
         async def nft_updates() -> Response:
             json_data = request.get_json(silent=True) or {}
             print(f"Webhook hit on route={route}")
-            print(f"Top-level keys={list(json_data.keys()) if isinstance(json_data, dict) else type(json_data)}")
+            print(
+                f"Top-level keys={list(json_data.keys()) if isinstance(json_data, dict) else type(json_data)}"
+            )
             await update_webhook_queue(json_data)
             return Response(status=HTTPStatus.OK)
 
@@ -200,7 +199,7 @@ def create_webhook_route(route: str):
 # ------------------------------------------------------------
 # QuickNode parser (legacy)
 # ------------------------------------------------------------
-def parse_quicknode_tx(json_data: dict) -> Optional[list]:
+def parse_quicknode_tx(json_data: dict):
     if not isinstance(json_data, dict) or len(json_data) == 0:
         return None
 
@@ -229,9 +228,6 @@ def parse_quicknode_tx(json_data: dict) -> Optional[list]:
 # Alchemy parser
 # ------------------------------------------------------------
 def map_alchemy_network(net: Optional[str]) -> Optional[str]:
-    """
-    Maps Alchemy webhook network enums to app network keys.
-    """
     if not net:
         return net
 
@@ -250,7 +246,6 @@ def parse_token_id(token_id_value: Any) -> str:
 
     token_id = str(token_id_value)
 
-    # Alchemy may deliver token ids as hex in some payloads.
     if token_id.startswith("0x"):
         try:
             return str(int(token_id, 16))
@@ -260,22 +255,14 @@ def parse_token_id(token_id_value: Any) -> str:
     return token_id
 
 
-def parse_alchemy_tx(json_data: dict) -> Optional[list]:
+def parse_alchemy_tx(json_data: dict):
     """
     Parses Alchemy NFT Activity webhook payloads into the internal format used
     by webhook_update/generate_output.
 
-    Expected high-level shape from Alchemy docs:
-    {
-      "webhookId": "...",
-      "type": "NFT_ACTIVITY",
-      "event": {
-        "network": "POLYGON_MAINNET",
-        "activity": [ ... ]
-      }
-    }
-
-    We intentionally parse defensively because payloads can vary by activity type.
+    Mint-only mode:
+    - only zero-address mints are kept
+    - all other transfers/sales are ignored
     """
     if not isinstance(json_data, dict) or len(json_data) == 0:
         return None
@@ -291,13 +278,18 @@ def parse_alchemy_tx(json_data: dict) -> Optional[list]:
     print(f"Alchemy activities found: {len(activities)} for webhook_id={webhook_id}")
 
     out = []
+    zero_address = "0x0000000000000000000000000000000000000000"
 
     for activity in activities:
         try:
             contract = activity.get("contractAddress") or activity.get("contract_address")
             owner = activity.get("toAddress") or activity.get("to_address")
             from_address = activity.get("fromAddress") or activity.get("from_address")
-            tx_hash = activity.get("hash") or activity.get("transactionHash") or activity.get("transaction_hash")
+            tx_hash = (
+                activity.get("hash")
+                or activity.get("transactionHash")
+                or activity.get("transaction_hash")
+            )
             token_id = parse_token_id(
                 activity.get("tokenId")
                 or activity.get("erc721TokenId")
@@ -307,10 +299,7 @@ def parse_alchemy_tx(json_data: dict) -> Optional[list]:
             if not contract or not owner or not tx_hash or not token_id:
                 continue
 
-            # Best-effort mint classification:
-            # NFT mints are transfers from zero address.
-            zero_address = "0x0000000000000000000000000000000000000000"
-
+            # Mint-only mode: ignore non-mint transfers
             if not from_address or from_address.lower() != zero_address:
                 continue
 
@@ -320,14 +309,6 @@ def parse_alchemy_tx(json_data: dict) -> Optional[list]:
                 "price_usd": "",
                 "currency": "",
                 "marketplace": "alchemy",
-            }
-
-            info = {
-                "type": event_type,
-                "price": activity.get("value") or activity.get("amount") or "",
-                "price_usd": activity.get("valueUsd") or activity.get("value_usd") or "",
-                "currency": activity.get("asset") or activity.get("currency") or "",
-                "marketplace": activity.get("marketplace") or "alchemy",
             }
 
             out.append(
@@ -349,7 +330,7 @@ def parse_alchemy_tx(json_data: dict) -> Optional[list]:
     return out if len(out) > 0 else None
 
 
-def parse_tx(json_data: dict) -> Optional[list]:
+def parse_tx(json_data: dict):
     """
     Unified parser:
     - QuickNode Streams payloads
@@ -360,13 +341,17 @@ def parse_tx(json_data: dict) -> Optional[list]:
 
     # QuickNode path
     if "receipts" in json_data or (
-        "metadata" in json_data and isinstance(json_data.get("metadata"), dict) and "stream_id" in json_data["metadata"]
+        "metadata" in json_data
+        and isinstance(json_data.get("metadata"), dict)
+        and "stream_id" in json_data["metadata"]
     ):
         return parse_quicknode_tx(json_data)
 
     # Alchemy path
     if "webhookId" in json_data or (
-        "type" in json_data and "event" in json_data and isinstance(json_data.get("event"), dict)
+        "type" in json_data
+        and "event" in json_data
+        and isinstance(json_data.get("event"), dict)
     ):
         return parse_alchemy_tx(json_data)
 
