@@ -442,6 +442,9 @@ def generate_output(network, contract, owner, token_id, hash, info):
     collection = query_collection(network, contract)
 
     if collection is None:
+        collection = query_collection(network, contract.lower())
+
+    if collection is None:
         raise Exception(f"No collection found for network={network}, contract={contract}")
 
     minter = collection["minter"]
