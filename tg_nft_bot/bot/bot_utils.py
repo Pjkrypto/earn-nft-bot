@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, Optional
 import traceback
+import time
 
 from flask import Response, request
 from werkzeug.routing import Rule
@@ -446,8 +447,16 @@ def generate_output(network, contract, owner, token_id, hash, info):
 
     total_supply = get_total_supply(network, contract, minter)
 
-    # Metadata can lag right after mint. Fall back gracefully.
-    nft_data = get_metadata(network, contract, token_id) or {}
+    # Retry metadata because Alchemy webhooks can arrive before metadata indexes
+    nft_data = None
+    for _ in range(10):  # up to ~20 seconds
+        nft_data = get_metadata(network, contract, token_id)
+        if nft_data:
+            break
+        time.sleep(2)
+
+    if nft_data is None:
+        nft_data = {}
 
     nft_name = nft_data.get("name") or f"{collection_name} #{token_id}"
 
