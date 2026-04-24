@@ -6,10 +6,7 @@ import time
 
 from flask import Response, request
 from werkzeug.routing import Rule
-from telegram import (
-    LinkPreviewOptions,
-    Update,
-)
+from telegram import LinkPreviewOptions, Update
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -39,9 +36,6 @@ from tg_nft_bot.nft.nft_constants import OPENSEA, RARIBLE
 from tg_nft_bot.bot.bot_config import flask_app
 
 
-# ------------------------------------------------------------
-# Network helpers
-# ------------------------------------------------------------
 def normalize_network(net: Optional[str]) -> Optional[str]:
     if not net:
         return net
@@ -75,9 +69,6 @@ def normalize_scan_network(net: str) -> str:
     return normalize_network(net)
 
 
-# ------------------------------------------------------------
-# context
-# ------------------------------------------------------------
 class ChatData:
     def __init__(self) -> None:
         self.webhook: str = None
@@ -465,9 +456,9 @@ def generate_output(
     opensea = OPENSEA[network] + contract_checksum + "/" + token_id
 
     if network == "polygon-mainnet":
-        rarible = f"https://rarible.com/polygon/items/{contract_lower}%3A{token_id}"
+        rarible = f"https://rarible.com/polygon/items/{contract_lower}:{token_id}"
     else:
-        rarible = RARIBLE[network] + contract_checksum + "%3A" + token_id
+        rarible = RARIBLE[network] + contract_checksum + ":" + token_id
 
     apenft = "https://apenft.io/#/asset/" + contract_checksum + "/" + token_id
     scan = SCANS[network]
