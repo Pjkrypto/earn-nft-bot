@@ -35,7 +35,7 @@ from tg_nft_bot.nft.nft_operations import (
     get_total_supply,
     get_url,
 )
-from tg_nft_bot.nft.nft_constants import MAGIC_EDEN, OPENSEA, RARIBLE
+from tg_nft_bot.nft.nft_constants import OPENSEA, RARIBLE
 
 # app
 from tg_nft_bot.bot.bot_config import flask_app
@@ -446,6 +446,7 @@ def generate_output(
 ):
     network = normalize_scan_network(network)
     token_id = str(token_id)
+    contract_lower = contract_lower.lower()
 
     collection = query_collection(network, contract_lower)
     if collection is None:
@@ -494,8 +495,12 @@ def generate_output(
         nft_image = website
 
     opensea = OPENSEA[network] + contract_checksum + "/" + token_id
-    rarible = RARIBLE[network] + contract_checksum + ":" + token_id
-    magicEden = MAGIC_EDEN[network] + contract_checksum + "/" + token_id
+
+    if network == "polygon-mainnet":
+        rarible = f"https://rarible.com/polygon/items/{contract_lower}:{token_id}"
+    else:
+        rarible = RARIBLE[network] + contract_checksum + ":" + token_id
+
     apenft = "https://apenft.io/#/asset/" + contract_checksum + "/" + token_id
 
     scan = SCANS[network]
@@ -544,8 +549,7 @@ def generate_output(
         message += '<a href="' + apenft + '">ApeNFT.io</a> '
     else:
         message += '<a href="' + opensea + '">Opensea</a> | '
-        message += '<a href="' + rarible + '">Rarible</a> | '
-        message += '<a href="' + magicEden + '">MagicEden</a>\n'
+        message += '<a href="' + rarible + '">Rarible</a>\n'
 
     message += "\n\nAD: "
     message += '<a href="https://t.me/EARNServices">Book a slot to show your ad here!</a>\n'
