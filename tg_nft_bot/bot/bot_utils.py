@@ -6,7 +6,10 @@ import time
 
 from flask import Response, request
 from werkzeug.routing import Rule
-from telegram import LinkPreviewOptions, Update
+from telegram import (
+    LinkPreviewOptions,
+    Update,
+)
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -22,6 +25,7 @@ from tg_nft_bot.db.db_operations import (
     query_minter_by_webhook,
 )
 
+# helpers
 from tg_nft_bot.utils.networks import SCANS
 from tg_nft_bot.utils.credentials import TOKEN
 
@@ -31,11 +35,15 @@ from tg_nft_bot.nft.nft_operations import (
     get_total_supply,
     get_url,
 )
-from tg_nft_bot.nft.nft_constants import OPENSEA, RARIBLE
+from tg_nft_bot.nft.nft_constants import OPENSEA
 
+# app
 from tg_nft_bot.bot.bot_config import flask_app
 
 
+# ------------------------------------------------------------
+# Network helpers
+# ------------------------------------------------------------
 def normalize_network(net: Optional[str]) -> Optional[str]:
     if not net:
         return net
@@ -69,7 +77,12 @@ def normalize_scan_network(net: str) -> str:
     return normalize_network(net)
 
 
+# ------------------------------------------------------------
+# context
+# ------------------------------------------------------------
 class ChatData:
+    """Custom class for chat_data. Here we store data per message."""
+
     def __init__(self) -> None:
         self.webhook: str = None
         self.name: str = None
@@ -148,6 +161,11 @@ class CustomContext(CallbackContext[ExtBot, dict, ChatData, dict]):
         self.chat_data.menu = value
 
 
+#################################################################
+#######################     WEBHOOK     #########################
+#################################################################
+
+
 @dataclass
 class WebhookUpdate:
     data: dict
@@ -178,6 +196,9 @@ def create_webhook_route(route: str):
         print("Webhook route created: " + route)
 
 
+# ------------------------------------------------------------
+# QuickNode parser (legacy)
+# ------------------------------------------------------------
 def parse_quicknode_tx(json_data: dict):
     if not isinstance(json_data, dict) or len(json_data) == 0:
         return None
@@ -203,6 +224,9 @@ def parse_quicknode_tx(json_data: dict):
         return None
 
 
+# ------------------------------------------------------------
+# Alchemy parser
+# ------------------------------------------------------------
 def map_alchemy_network(net: Optional[str]) -> Optional[str]:
     if not net:
         return net
@@ -232,6 +256,14 @@ def parse_token_id(token_id_value: Any) -> str:
 
 
 def parse_alchemy_tx(json_data: dict):
+    """
+    Parses Alchemy NFT Activity webhook payloads into the internal format used
+    by webhook_update/generate_output.
+
+    Mint-only mode:
+    - only zero-address mints are kept
+    - all other transfers/sales are ignored
+    """
     if not isinstance(json_data, dict) or len(json_data) == 0:
         return None
 
@@ -267,6 +299,7 @@ def parse_alchemy_tx(json_data: dict):
             if not contract or not owner or not tx_hash or not token_id:
                 continue
 
+            # Mint-only mode: ignore non-mint transfers
             if not from_address or from_address.lower() != zero_address:
                 continue
 
@@ -297,6 +330,11 @@ def parse_alchemy_tx(json_data: dict):
 
 
 def parse_tx(json_data: dict):
+    """
+    Unified parser:
+    - QuickNode Streams payloads
+    - Alchemy NFT Activity webhook payloads
+    """
     if not isinstance(json_data, dict):
         return None
 
@@ -385,6 +423,7 @@ async def update_webhook_queue(new_data):
     await application.update_queue.put(WebhookUpdate(data=new_data))
 
 
+# create bot
 context_types = ContextTypes(context=CustomContext, chat_data=ChatData)
 application = (
     ApplicationBuilder()
@@ -407,7 +446,6 @@ def generate_output(
 ):
     network = normalize_scan_network(network)
     token_id = str(token_id)
-    contract_lower = contract_lower.lower()
 
     collection = query_collection(network, contract_lower)
     if collection is None:
@@ -422,14 +460,16 @@ def generate_output(
     collection_name = collection["name"]
     website = collection["website"]
 
+    # total supply / metadata should use checksum contract for web3 calls
     try:
         total_supply = get_total_supply(network, contract_checksum, minter)
     except Exception:
         traceback.print_exc()
         total_supply = None
 
+    # Retry metadata because Alchemy webhooks can arrive before metadata indexes
     nft_data = None
-    for _ in range(10):
+    for _ in range(10):  # up to ~20 seconds
         try:
             nft_data = get_metadata(network, contract_checksum, token_id)
             if nft_data:
@@ -454,13 +494,8 @@ def generate_output(
         nft_image = website
 
     opensea = OPENSEA[network] + contract_checksum + "/" + token_id
-
-    if network == "polygon-mainnet":
-        rarible = f"https://rarible.com/polygon/items/{contract_lower}:{token_id}"
-    else:
-        rarible = RARIBLE[network] + contract_checksum + ":" + token_id
-
     apenft = "https://apenft.io/#/asset/" + contract_checksum + "/" + token_id
+
     scan = SCANS[network]
 
     if info["type"] == "mint":
@@ -506,11 +541,9 @@ def generate_output(
     if network == "tron-mainnet":
         message += '<a href="' + apenft + '">ApeNFT.io</a> '
     else:
-        message += '<a href="' + opensea + '">Opensea</a> | '
-        message += '<a href="' + rarible + '">Rarible</a>\n'
+        message += '<a href="' + opensea + '">Opensea</a>\n'
 
     message += "\n\nAD: "
-    message += '<a href="https://t.me/EARNServices">Book a slot to show your ad here!</a>\n'
-    message += "\n<i>Powered by @EARNServices</i>"
+    message += '<a href="https://t.me/PJ_Krypto">Book a slot to show your ad here!</a>\n'
 
     return [nft_image, message]
