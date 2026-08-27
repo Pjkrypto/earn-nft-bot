@@ -33,6 +33,12 @@ gateways = {
     "btfs": ["gateway.btfs.io"],
 }
 
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("NFT_HTTP_TIMEOUT_SECONDS", "15"))
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; EarnNFTBot/1.0)",
+    "Accept": "*/*",
+}
+
 
 class SaleData(TypedDict):
     type: str
@@ -53,46 +59,76 @@ class LogData(TypedDict):
 
 
 def is_valid_url(url: str, is_image=False) -> bool:
+    if not isinstance(url, str) or not url.strip():
+        return False
 
     try:
-        response = requests.get(url)
+        response = requests.get(
+            url.strip(),
+            headers=REQUEST_HEADERS,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
 
-        if response.status_code == 200:
-
-            if is_image:
-                image = Image.open(BytesIO(response.content))
-                image.verify()
-
-            return True
-        else:
+        if response.status_code != 200 or not response.content:
             return False
 
-    except Exception:
+        if is_image:
+            image = Image.open(BytesIO(response.content))
+            image.verify()
+
+        return True
+
+    except Exception as e:
+        print(f"URL validation failed for {url[:180]}: {type(e).__name__}: {e}")
         return False
 
 
 def get_url(link: str, is_image=False) -> str:
+    """
+    Resolve normal HTTP(S), IPFS, and BTFS links to a reachable URL.
 
-    if link[:8] == "https://":
-        url = link
-        if is_valid_url(url, is_image):
-            return url
-        else:
-            url = link[:4] + link[5:]
+    The old implementation could throw on malformed/unknown protocols and had
+    no request timeouts. This version fails cleanly so callers can retry.
+    """
+    if not isinstance(link, str):
+        return ""
+
+    link = link.strip()
+    if not link:
+        return ""
+
+    if link.startswith("https://") or link.startswith("http://"):
+        candidates = [link]
+
+        # Preserve the old HTTPS -> HTTP fallback behavior.
+        if link.startswith("https://"):
+            candidates.append("http://" + link[len("https://"):])
+
+        for url in candidates:
             if is_valid_url(url, is_image):
                 return url
-    else:
-        url_parts = link.split("://")
-        protocol = url_parts[0]
-        suburl = url_parts[1]
-        for gateway in gateways[protocol]:
-            url = "https://" + gateway + "/" + protocol + "/" + suburl
-            if is_valid_url(url, is_image):
-                return url
-            else:
-                url = url[:4] + url[5:]
-                if is_valid_url(url, is_image):
-                    return url
+        return ""
+
+    if "://" not in link:
+        return ""
+
+    protocol, suburl = link.split("://", 1)
+    protocol = protocol.lower().strip()
+    suburl = suburl.lstrip("/")
+
+    protocol_gateways = gateways.get(protocol)
+    if not protocol_gateways or not suburl:
+        print(f"Unsupported or malformed media protocol: {protocol!r}")
+        return ""
+
+    for gateway in protocol_gateways:
+        https_url = f"https://{gateway}/{protocol}/{suburl}"
+        if is_valid_url(https_url, is_image):
+            return https_url
+
+        http_url = f"http://{gateway}/{protocol}/{suburl}"
+        if is_valid_url(http_url, is_image):
+            return http_url
 
     return ""
 
@@ -172,7 +208,11 @@ def get_sale_info(network: str, minter: str, log) -> Union[SaleData, NoneType]:
         url = f"{RESERVOIR_URL[network]}tokens/{contract}%3A{token_id}/activity/v5?limit=1&sortBy=eventTimestamp&types=sale"
         headers = {"accept": "*/*", "x-api-key": RESERVOIR_API_KEY}
 
-        response = requests.get(url, headers=headers)
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
         data_json = response.json()
 
         events = data_json["activities"]
@@ -284,26 +324,38 @@ def get_total_supply(network, contract, minter):
 
 
 def get_metadata_json(metadataLink: str):
-
     url = get_url(metadataLink)
+
+    if not url:
+        print(f"Could not resolve metadata URL: {metadataLink}")
+        return None
+
     try:
-        # Send a GET request to the URL
-        response = requests.get(url)
+        response = requests.get(
+            url,
+            headers=REQUEST_HEADERS,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
 
-        # Check if the request was successful
-        if response.status_code == 200:
-            try:
-                # Try to parse the response content as JSON
-                json_data = response.json()
-                return json_data
-            except Exception as e:
-                print(f"Invalid JSON: {e}")
-        else:
-            print(f"Error: Received status code {response.status_code}")
+        if response.status_code != 200:
+            print(f"Metadata request returned status {response.status_code}: {url}")
+            return None
+
+        try:
+            json_data = response.json()
+        except Exception as e:
+            print(f"Invalid metadata JSON from {url}: {e}")
+            return None
+
+        if not isinstance(json_data, dict):
+            print(f"Metadata JSON was not an object: {url}")
+            return None
+
+        return json_data
+
     except Exception as e:
-        print(f"Request metadata failed: {e}")
-
-    return None
+        print(f"Request metadata failed for {url}: {type(e).__name__}: {e}")
+        return None
 
 
 def get_metadata(network: str, contract: str, token_id: str):
