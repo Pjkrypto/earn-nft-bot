@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, Optional
+import os
 import traceback
 import time
 
@@ -39,6 +40,12 @@ from tg_nft_bot.nft.nft_constants import OPENSEA
 
 # app
 from tg_nft_bot.bot.bot_config import flask_app
+
+
+# Metadata can be temporarily incomplete immediately after a mint webhook.
+# Keep these configurable without requiring new environment variables.
+NFT_METADATA_FETCH_RETRIES = int(os.getenv("NFT_METADATA_FETCH_RETRIES", "10"))
+NFT_METADATA_RETRY_SECONDS = float(os.getenv("NFT_METADATA_RETRY_SECONDS", "2"))
 
 
 # ------------------------------------------------------------
@@ -435,6 +442,18 @@ application = (
 )
 
 
+def _collection_requires_traits(collection_name: str) -> bool:
+    """
+    NeanderBros and NeanderGals are expected to have trait metadata.
+    Other collections supported by this bot may legitimately omit attributes,
+    so traits are only mandatory for the Neander collections.
+    """
+    normalized = "".join(
+        ch for ch in str(collection_name or "").casefold() if ch.isalnum()
+    )
+    return normalized in {"neanderbros", "neandergals"}
+
+
 def generate_output(
     network,
     contract_lower,
@@ -467,31 +486,63 @@ def generate_output(
         traceback.print_exc()
         total_supply = None
 
-    # Retry metadata because Alchemy webhooks can arrive before metadata indexes
-    nft_data = None
-    for _ in range(10):  # up to ~20 seconds
-        try:
-            nft_data = get_metadata(network, contract_checksum, token_id)
-            if nft_data:
-                break
-        except Exception:
-            traceback.print_exc()
-        time.sleep(2)
+    # A webhook can arrive before the token URI / IPFS metadata / image gateway
+    # is fully available. Do not accept merely "truthy" metadata. For every NFT
+    # we require a working image; for NeanderBros/Gals we also require traits.
+    attempts = max(1, NFT_METADATA_FETCH_RETRIES)
+    require_traits = _collection_requires_traits(collection_name)
 
-    if nft_data is None:
-        nft_data = {}
+    nft_data = None
+    nft_image = ""
+    last_metadata_reason = "metadata unavailable"
+
+    for attempt in range(attempts):
+        try:
+            candidate = get_metadata(network, contract_checksum, token_id)
+
+            if not isinstance(candidate, dict) or not candidate:
+                last_metadata_reason = "metadata missing or not a JSON object"
+            else:
+                raw_image = candidate.get("image")
+                attributes = candidate.get("attributes")
+                has_traits = isinstance(attributes, list) and len(attributes) > 0
+
+                if not isinstance(raw_image, str) or not raw_image.strip():
+                    last_metadata_reason = "image field missing"
+                elif require_traits and not has_traits:
+                    last_metadata_reason = "traits not available yet"
+                else:
+                    resolved_image = get_url(raw_image.strip(), True)
+                    if not resolved_image:
+                        last_metadata_reason = "image URL not reachable yet"
+                    else:
+                        nft_data = candidate
+                        nft_image = resolved_image
+                        break
+
+            print(
+                f"Incomplete NFT metadata for {collection_name} tokenId={token_id} "
+                f"attempt={attempt + 1}/{attempts}: {last_metadata_reason}"
+            )
+
+        except Exception as e:
+            last_metadata_reason = f"{type(e).__name__}: {e}"
+            print(
+                f"NFT metadata fetch failed for {collection_name} tokenId={token_id} "
+                f"attempt={attempt + 1}/{attempts}: {last_metadata_reason}"
+            )
+            traceback.print_exc()
+
+        if attempt + 1 < attempts:
+            time.sleep(max(0.0, NFT_METADATA_RETRY_SECONDS))
+
+    if nft_data is None or not nft_image:
+        raise RuntimeError(
+            f"Giving up on {collection_name} tokenId={token_id} after {attempts} "
+            f"metadata attempts: {last_metadata_reason}"
+        )
 
     nft_name = nft_data.get("name") or f"{collection_name} #{token_id}"
-
-    raw_image = nft_data.get("image")
-    if raw_image:
-        try:
-            nft_image = get_url(raw_image, True)
-        except Exception:
-            traceback.print_exc()
-            nft_image = website
-    else:
-        nft_image = website
 
     opensea = OPENSEA[network] + contract_checksum + "/" + token_id
     apenft = "https://apenft.io/#/asset/" + contract_checksum + "/" + token_id
@@ -529,6 +580,8 @@ def generate_output(
     if attributes:
         message += "\n<u>Traits:</u>\n"
         for attr in attributes:
+            if not isinstance(attr, dict):
+                continue
             trait_type = attr.get("trait_type", "")
             value = attr.get("value", "")
             message += f"{trait_type}: {value}\n"
