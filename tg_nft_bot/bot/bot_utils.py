@@ -1,9 +1,13 @@
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, Optional
+import html
 import os
+import re
 import traceback
 import time
+
+import httpx
 
 from flask import Response, request
 from werkzeug.routing import Rule
@@ -46,6 +50,8 @@ from tg_nft_bot.bot.bot_config import flask_app
 # Keep these configurable without requiring new environment variables.
 NFT_METADATA_FETCH_RETRIES = int(os.getenv("NFT_METADATA_FETCH_RETRIES", "10"))
 NFT_METADATA_RETRY_SECONDS = float(os.getenv("NFT_METADATA_RETRY_SECONDS", "2"))
+
+TCG_DISCORD_WEBHOOK_URL = os.getenv("TCG_DISCORD_WEBHOOK_URL", "").strip()
 
 
 # ------------------------------------------------------------
@@ -364,6 +370,73 @@ def parse_tx(json_data: dict):
     return None
 
 
+def _discord_text_from_telegram_html(text: str) -> str:
+    value = text or ""
+
+    # Telegram HTML links -> Discord markdown links.
+    value = re.sub(
+        r'<a\s+href="([^"]+)">([^<]+)</a>',
+        lambda m: f"[{html.unescape(m.group(2))}]({html.unescape(m.group(1))})",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    # Bold/underline combinations -> Discord bold where practical.
+    value = re.sub(
+        r"<u>\s*<b>(.*?)</b>\s*</u>",
+        r"**\1**",
+        value,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    value = re.sub(
+        r"<b>(.*?)</b>",
+        r"**\1**",
+        value,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    # Strip remaining HTML tags and decode entities.
+    value = re.sub(r"<[^>]+>", "", value)
+    return html.unescape(value).strip()
+
+
+async def _send_discord_mint(img: str, text: str) -> tuple[bool, str]:
+    if not TCG_DISCORD_WEBHOOK_URL:
+        return True, "skipped"
+
+    embed = {
+        "title": "🟢 NEW NEANDERBROS MINT!",
+        "description": _discord_text_from_telegram_html(text),
+    }
+
+    if img:
+        embed["image"] = {"url": img}
+
+    payload = {
+        "embeds": [embed],
+        "allowed_mentions": {"parse": []},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                TCG_DISCORD_WEBHOOK_URL,
+                json=payload,
+            )
+
+        if response.status_code >= 400:
+            return (
+                False,
+                f"Discord API error {response.status_code}: "
+                f"{response.text[:400]}",
+            )
+
+        return True, "ok"
+
+    except Exception as exc:
+        return False, f"Discord send failed: {exc}"
+
+
 async def webhook_update(
     update: WebhookUpdate, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -414,6 +487,26 @@ async def webhook_update(
 
                 if not sent:
                     print(f"Giving up sending to chat_id={chat_id}")
+
+            # Discord is a second output for mint notifications only.
+            # Keep Telegram behavior unchanged and avoid duplicate sale posts,
+            # since the dedicated sales bot already handles Discord sales.
+            if str(data.get("info", {}).get("type", "")).lower() == "mint":
+                discord_ok, discord_resp = await _send_discord_mint(img, text)
+
+                if discord_ok:
+                    if discord_resp == "skipped":
+                        print("Discord mint skipped: TCG_DISCORD_WEBHOOK_URL not set")
+                    else:
+                        print(
+                            "Sent mint webhook event to Discord "
+                            f"token_id={data['token_id']}"
+                        )
+                else:
+                    print(
+                        "Discord mint send failed "
+                        f"token_id={data['token_id']}: {discord_resp}"
+                    )
 
         except Exception:
             print("webhook_update processing failed:")
