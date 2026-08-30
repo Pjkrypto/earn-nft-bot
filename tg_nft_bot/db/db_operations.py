@@ -25,106 +25,103 @@ class CollectionConfigs(db.Model):
 
 # class BotAuthorizations(db.Model):
 #     __tablename__ = "authorizations"
-
+#
 #     id = db.Column(db.Integer, primary_key=True)
 #     name = db.Column(db.String(255), nullable=True)
 #     tgId = db.Column(db.BigInteger, nullable=True)
 
 
+def _collection_to_dict(collection):
+    """
+    Convert a CollectionConfigs row to the dictionary format used by the bot.
+    Return None when no matching database row exists.
+    """
+    if collection is None:
+        return None
+
+    return {
+        "id": collection.id,
+        "name": collection.name,
+        "slug": collection.slug,
+        "contract": collection.contract,
+        "minter": collection.minter,
+        "network": collection.network,
+        "website": collection.website,
+        "webhookId": collection.webhookId,
+        "chats": collection.chats,
+    }
+
+
+def _normalize_contract_for_lookup(network, contract):
+    """
+    Database EVM contracts are stored as checksum addresses.
+
+    Alchemy and other webhook providers may send the same address in lowercase,
+    so normalize EVM addresses before database lookups. TRON addresses are left
+    unchanged.
+
+    If a non-address value is supplied, return it unchanged so callers get a
+    normal "not found" result instead of crashing during lookup.
+    """
+    if contract is None:
+        return None
+
+    if network == "tron-mainnet":
+        return contract
+
+    try:
+        return Web3.to_checksum_address(contract)
+    except Exception:
+        return contract
+
+
 def query_table():
     with flask_app.app_context():
         collections = CollectionConfigs.query.all()
-        collection_list = [
-            {
-                "id": collection.id,
-                "name": collection.name,
-                "slug": collection.slug,
-                "contract": collection.contract,
-                "minter": collection.minter,
-                "network": collection.network,
-                "website": collection.website,
-                "webhookId": collection.webhookId,
-                "chats": collection.chats,
-            }
-            for collection in collections
-        ]
+        collection_list = [_collection_to_dict(collection) for collection in collections]
     return collection_list
 
 
 def query_collection(network, contract):
+    """
+    Find a collection by network + contract.
+
+    EVM contract matching is normalized to checksum form so lowercase Alchemy
+    contract addresses correctly match the checksum address stored in the DB.
+    Returns None when no collection is found.
+    """
+    lookup_contract = _normalize_contract_for_lookup(network, contract)
+
     with flask_app.app_context():
         collection = CollectionConfigs.query.filter_by(
-            contract=contract, network=network
+            contract=lookup_contract,
+            network=network,
         ).first()
-        collection_dict = {
-            "id": collection.id,
-            "name": collection.name,
-            "slug": collection.slug,
-            "contract": collection.contract,
-            "minter": collection.minter,
-            "network": collection.network,
-            "website": collection.website,
-            "webhookId": collection.webhookId,
-            "chats": collection.chats,
-        }
-    return collection_dict
+
+        return _collection_to_dict(collection)
 
 
 def query_collection_by_webhook(webhook_id):
     with flask_app.app_context():
         collection = CollectionConfigs.query.filter_by(webhookId=webhook_id).first()
-        collection_dict = {
-            "id": collection.id,
-            "name": collection.name,
-            "slug": collection.slug,
-            "contract": collection.contract,
-            "minter": collection.minter,
-            "network": collection.network,
-            "website": collection.website,
-            "webhookId": collection.webhookId,
-            "chats": collection.chats,
-        }
-    return collection_dict
+        return _collection_to_dict(collection)
 
 
 def query_collection_by_chat(chatId):
     with flask_app.app_context():
-
         collections = CollectionConfigs.query.filter(
             CollectionConfigs.chats.any(chatId)
         ).all()
-        collection_list = [
-            {
-                "id": collection.id,
-                "name": collection.name,
-                "slug": collection.slug,
-                "contract": collection.contract,
-                "minter": collection.minter,
-                "network": collection.network,
-                "website": collection.website,
-                "webhookId": collection.webhookId,
-                "chats": collection.chats,
-            }
-            for collection in collections
-        ]
+
+        collection_list = [_collection_to_dict(collection) for collection in collections]
+
     return collection_list
 
 
 def query_collection_by_id(cid):
     with flask_app.app_context():
         collection = CollectionConfigs.query.filter_by(id=cid).first()
-        collection_dict = {
-            "id": collection.id,
-            "name": collection.name,
-            "slug": collection.slug,
-            "contract": collection.contract,
-            "minter": collection.minter,
-            "network": collection.network,
-            "website": collection.website,
-            "webhookId": collection.webhookId,
-            "chats": collection.chats,
-        }
-    return collection_dict
+        return _collection_to_dict(collection)
 
 
 def query_network_by_webhook(webhook_id):
@@ -133,32 +130,35 @@ def query_network_by_webhook(webhook_id):
 
     if entry is None:
         return None
-    else:
-        return entry.network
+    return entry.network
 
 
 def query_website_by_contract(contract, network):
+    lookup_contract = _normalize_contract_for_lookup(network, contract)
+
     with flask_app.app_context():
         entry = CollectionConfigs.query.filter_by(
-            contract=contract, network=network
+            contract=lookup_contract,
+            network=network,
         ).first()
 
     if entry is None:
         return None
-    else:
-        return entry.website
+    return entry.website
 
 
 def query_name_by_contract(network, contract):
+    lookup_contract = _normalize_contract_for_lookup(network, contract)
+
     with flask_app.app_context():
         entry = CollectionConfigs.query.filter_by(
-            contract=contract, network=network
+            contract=lookup_contract,
+            network=network,
         ).first()
 
     if entry is None:
         return None
-    else:
-        return entry.name
+    return entry.name
 
 
 def query_minter_by_webhook(webhook_id):
@@ -167,51 +167,57 @@ def query_minter_by_webhook(webhook_id):
 
     if entry is None:
         return None
-    else:
-        return entry.minter
+    return entry.minter
 
 
 def query_slug_by_contract(network, contract):
+    lookup_contract = _normalize_contract_for_lookup(network, contract)
+
     with flask_app.app_context():
         entry = CollectionConfigs.query.filter_by(
-            contract=contract, network=network
+            contract=lookup_contract,
+            network=network,
         ).first()
 
     if entry is None:
         return None
-    else:
-        return entry.slug
+    return entry.slug
 
 
 def query_chats_by_contract(network, contract):
+    lookup_contract = _normalize_contract_for_lookup(network, contract)
+
     with flask_app.app_context():
         entry = CollectionConfigs.query.filter_by(
-            contract=contract, network=network
+            contract=lookup_contract,
+            network=network,
         ).first()
 
     if entry is None:
         return None
-    else:
-        return entry.chats
+    return entry.chats
 
 
 def check_if_exists(network, contract):
-    with flask_app.app_context():
+    lookup_contract = _normalize_contract_for_lookup(network, contract)
 
+    with flask_app.app_context():
         entry = CollectionConfigs.query.filter_by(
-            contract=contract, network=network
+            contract=lookup_contract,
+            network=network,
         ).first()
 
     if entry is None:
         return None
-    else:
-        print("Entry: ", entry.id)
-        return entry.id
+
+    print("Entry: ", entry.id)
+    return entry.id
 
 
 def initial_config():
     print("initializing app with database...")
     db.init_app(flask_app)
+
     with flask_app.app_context():
         engine = db.get_engine()
         if not engine.dialect.has_table(engine.connect(), TABLE):
@@ -221,7 +227,6 @@ def initial_config():
 
 
 def add_config(name, slug, network, contract, minter, website, webhook_id, chats):
-
     with flask_app.app_context():
         config = CollectionConfigs(
             name=name,
@@ -241,17 +246,26 @@ def add_config(name, slug, network, contract, minter, website, webhook_id, chats
             webhookId=webhook_id,
             chats=chats,
         )
+
         db.session.add(config)
         db.session.commit()
 
 
 def update_config(name, slug, network, contract, minter, website, webhook_id, chats):
+    lookup_contract = _normalize_contract_for_lookup(network, contract)
 
     with flask_app.app_context():
-
         row_to_update = CollectionConfigs.query.filter_by(
-            contract=contract, network=network
+            contract=lookup_contract,
+            network=network,
         ).first()
+
+        if row_to_update is None:
+            raise ValueError(
+                f"Collection configuration not found for "
+                f"network={network}, contract={contract}"
+            )
+
         row_to_update.name = name
         row_to_update.slug = slug
         row_to_update.network = network
@@ -261,11 +275,14 @@ def update_config(name, slug, network, contract, minter, website, webhook_id, ch
             else Web3.to_checksum_address(contract)
         )
         row_to_update.minter = (
-            minter if network == "tron-mainnet" else Web3.to_checksum_address(minter)
+            minter
+            if network == "tron-mainnet"
+            else Web3.to_checksum_address(minter)
         )
         row_to_update.website = website
         row_to_update.webhookId = webhook_id
         row_to_update.chats = chats
+
         db.session.commit()
 
 
@@ -274,13 +291,17 @@ def update_chats_by_id(id, chats):
         collection_update = CollectionConfigs.query.filter(
             CollectionConfigs.id == id
         ).one()
+
         collection_update.chats = chats
         db.session.commit()
 
 
 def delete_config_by_id(id):
-
     with flask_app.app_context():
-        collection = CollectionConfigs.query.filter(CollectionConfigs.id == id).one()
+        collection = CollectionConfigs.query.filter(
+            CollectionConfigs.id == id
+        ).one()
+
         db.session.delete(collection)
         db.session.commit()
+
