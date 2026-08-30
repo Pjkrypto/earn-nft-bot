@@ -247,6 +247,7 @@ def map_alchemy_network(net: Optional[str]) -> Optional[str]:
     mapping = {
         "ETH_MAINNET": "ethereum-mainnet",
         "POLYGON_MAINNET": "polygon-mainnet",
+        "MATIC_MAINNET": "polygon-mainnet",
         "ARB_MAINNET": "arbitrum-mainnet",
         "BASE_MAINNET": "base-mainnet",
     }
