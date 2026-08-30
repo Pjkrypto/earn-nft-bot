@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, Optional
+import asyncio
 import html
 import os
 import re
@@ -405,9 +406,12 @@ async def _send_discord_mint(img: str, text: str) -> tuple[bool, str]:
     if not TCG_DISCORD_WEBHOOK_URL:
         return True, "skipped"
 
+    # Use the Telegram-formatted mint text directly as the Discord
+    # description. Do not add a separate Discord embed title.
+    description = _discord_text_from_telegram_html(text)
+
     embed = {
-        "title": "🟢 NEW NEANDERBROS MINT!",
-        "description": _discord_text_from_telegram_html(text),
+        "description": description,
     }
 
     if img:
@@ -465,33 +469,9 @@ async def webhook_update(
                 info=data["info"],
             )
 
-            chats: list[str] = collection["chats"]
-            for chat_id in chats:
-                sent = False
-                for attempt in range(2):
-                    try:
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=text,
-                            link_preview_options=LinkPreviewOptions(
-                                url=img, show_above_text=True
-                            ),
-                            parse_mode="HTML",
-                        )
-                        print(f"Sent webhook event to chat_id={chat_id}")
-                        sent = True
-                        break
-                    except Exception:
-                        print(f"Sending message failed on attempt {attempt + 1}:")
-                        traceback.print_exc()
-                        time.sleep(2)
-
-                if not sent:
-                    print(f"Giving up sending to chat_id={chat_id}")
-
-            # Discord is a second output for mint notifications only.
-            # Keep Telegram behavior unchanged and avoid duplicate sale posts,
-            # since the dedicated sales bot already handles Discord sales.
+            # Discord and Telegram are independent outputs.
+            # Send Discord first so a Telegram API timeout can never prevent
+            # or delay the Discord mint notification.
             if str(data.get("info", {}).get("type", "")).lower() == "mint":
                 discord_ok, discord_resp = await _send_discord_mint(img, text)
 
@@ -509,8 +489,57 @@ async def webhook_update(
                         f"token_id={data['token_id']}: {discord_resp}"
                     )
 
+            # Telegram is attempted separately. A Telegram failure must not
+            # affect Discord or abort processing of later mint events.
+            chats: list[str] = collection["chats"] or []
+            for chat_id in chats:
+                sent = False
+
+                for attempt in range(3):
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                            link_preview_options=LinkPreviewOptions(
+                                url=img,
+                                show_above_text=True,
+                            ),
+                            parse_mode="HTML",
+                        )
+
+                        print(
+                            "Sent webhook event to Telegram "
+                            f"chat_id={chat_id} token_id={data['token_id']}"
+                        )
+                        sent = True
+                        break
+
+                    except Exception as exc:
+                        print(
+                            "Telegram send failed "
+                            f"chat_id={chat_id} token_id={data['token_id']} "
+                            f"attempt={attempt + 1}/3: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        traceback.print_exc()
+
+                        if attempt < 2:
+                            # Do not use time.sleep() inside this async handler;
+                            # it blocks every other webhook update.
+                            await asyncio.sleep(2)
+
+                if not sent:
+                    print(
+                        "Giving up Telegram send "
+                        f"chat_id={chat_id} token_id={data['token_id']} "
+                        "after 3 attempts"
+                    )
+
         except Exception:
-            print("webhook_update processing failed:")
+            print(
+                "webhook_update processing failed "
+                f"token_id={data.get('token_id', 'unknown')}:"
+            )
             traceback.print_exc()
 
 
