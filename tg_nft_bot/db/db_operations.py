@@ -1,9 +1,12 @@
 from flask_sqlalchemy import SQLAlchemy
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from sqlalchemy import inspect
+from sqlalchemy.exc import IntegrityError
 from web3 import Web3
 
 from tg_nft_bot.utils.credentials import TABLE
+from tg_nft_bot.utils.event_keys import build_mint_event_key
 
 db = SQLAlchemy()
 from tg_nft_bot.bot.bot_config import flask_app
@@ -21,6 +24,52 @@ class CollectionConfigs(db.Model):
     website = db.Column(db.String(255), nullable=True)
     webhookId = db.Column(db.String(255), nullable=True)
     chats = db.Column(db.ARRAY(db.BigInteger), nullable=True)
+
+
+class ProcessedMintEvents(db.Model):
+    """Persistently prevents duplicate notifications for the same NFT mint."""
+
+    __tablename__ = "processed_mint_events"
+
+    event_key = db.Column(db.String(64), primary_key=True)
+    webhook_id = db.Column(db.String(255), nullable=False)
+    network = db.Column(db.String(255), nullable=False)
+    contract = db.Column(db.String(255), nullable=False)
+    tx_hash = db.Column(db.String(255), nullable=False)
+    token_id = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=db.func.now(),
+    )
+
+
+def claim_mint_event(webhook_id, network, contract, tx_hash, token_id):
+    """
+    Atomically claim a mint for notification processing.
+
+    Returns True only for the first delivery. Concurrent Alchemy deliveries for
+    the same transaction/token hit the primary-key constraint and return False.
+    """
+    event_key = build_mint_event_key(network, contract, tx_hash, token_id)
+
+    with flask_app.app_context():
+        event = ProcessedMintEvents(
+            event_key=event_key,
+            webhook_id=str(webhook_id),
+            network=str(network),
+            contract=str(contract).lower(),
+            tx_hash=str(tx_hash).lower(),
+            token_id=str(token_id),
+        )
+        db.session.add(event)
+
+        try:
+            db.session.commit()
+            return True
+        except IntegrityError:
+            db.session.rollback()
+            return False
 
 
 # class BotAuthorizations(db.Model):
@@ -220,10 +269,13 @@ def initial_config():
 
     with flask_app.app_context():
         engine = db.get_engine()
-        if not engine.dialect.has_table(engine.connect(), TABLE):
+        if not inspect(engine).has_table(TABLE):
             db.drop_all()
-            db.create_all()
-            db.session.commit()
+
+        # Also creates newly introduced support tables, such as the persistent
+        # mint-event deduplication table, without altering existing tables.
+        db.create_all()
+        db.session.commit()
 
 
 def add_config(name, slug, network, contract, minter, website, webhook_id, chats):
@@ -304,4 +356,3 @@ def delete_config_by_id(id):
 
         db.session.delete(collection)
         db.session.commit()
-
