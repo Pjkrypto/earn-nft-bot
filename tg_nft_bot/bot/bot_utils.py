@@ -26,6 +26,7 @@ from telegram.ext import (
 from web3 import Web3
 
 from tg_nft_bot.db.db_operations import (
+    claim_mint_event,
     query_collection,
     query_collection_by_webhook,
     query_minter_by_webhook,
@@ -458,6 +459,21 @@ async def webhook_update(
                 continue
 
             network = normalize_network(collection["network"])
+
+            if str(data.get("info", {}).get("type", "")).lower() == "mint":
+                is_first_delivery = claim_mint_event(
+                    webhook_id=data["webhook_id"],
+                    network=network,
+                    contract=data["contract_lower"],
+                    tx_hash=data["hash"],
+                    token_id=data["token_id"],
+                )
+                if not is_first_delivery:
+                    print(
+                        "Duplicate mint webhook skipped "
+                        f"tx_hash={data['hash']} token_id={data['token_id']}"
+                    )
+                    continue
 
             img, text = generate_output(
                 network=network,
