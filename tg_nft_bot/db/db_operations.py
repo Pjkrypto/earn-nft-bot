@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from web3 import Web3
 
 from tg_nft_bot.utils.credentials import TABLE
-from tg_nft_bot.utils.event_keys import build_mint_event_key
+from tg_nft_bot.utils.event_keys import build_mint_event_key, normalize_token_id
 
 db = SQLAlchemy()
 from tg_nft_bot.bot.bot_config import flask_app
@@ -51,16 +51,40 @@ def claim_mint_event(webhook_id, network, contract, tx_hash, token_id):
     Returns True only for the first delivery. Concurrent Alchemy deliveries for
     the same transaction/token hit the primary-key constraint and return False.
     """
-    event_key = build_mint_event_key(network, contract, tx_hash, token_id)
+    normalized_network = str(network).strip().lower()
+    normalized_contract = str(contract).strip().lower()
+    normalized_token_id = normalize_token_id(token_id)
+    event_key = build_mint_event_key(
+        normalized_network,
+        normalized_contract,
+        tx_hash,
+        normalized_token_id,
+    )
 
     with flask_app.app_context():
+        # Rows created by older releases used the transaction hash in the
+        # primary key. Check their stored identity fields before inserting the
+        # new contract/token key so an Alchemy replay after deployment does not
+        # announce a historical mint one more time.
+        token_id_candidates = {normalized_token_id}
+        if normalized_token_id.isdigit():
+            token_id_candidates.add(hex(int(normalized_token_id)))
+
+        existing_event = ProcessedMintEvents.query.filter(
+            db.func.lower(ProcessedMintEvents.network) == normalized_network,
+            db.func.lower(ProcessedMintEvents.contract) == normalized_contract,
+            db.func.lower(ProcessedMintEvents.token_id).in_(token_id_candidates),
+        ).first()
+        if existing_event is not None:
+            return False
+
         event = ProcessedMintEvents(
             event_key=event_key,
             webhook_id=str(webhook_id),
-            network=str(network),
-            contract=str(contract).lower(),
+            network=normalized_network,
+            contract=normalized_contract,
             tx_hash=str(tx_hash).lower(),
-            token_id=str(token_id),
+            token_id=normalized_token_id,
         )
         db.session.add(event)
 
